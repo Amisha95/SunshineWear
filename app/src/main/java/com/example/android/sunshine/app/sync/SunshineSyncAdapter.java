@@ -24,6 +24,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.preference.PreferenceManager;
 import android.support.annotation.IntDef;
+import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
 import android.support.v4.app.NotificationCompat;
 import android.support.v4.app.TaskStackBuilder;
 import android.text.format.Time;
@@ -36,6 +38,15 @@ import com.example.android.sunshine.app.R;
 import com.example.android.sunshine.app.Utility;
 import com.example.android.sunshine.app.data.WeatherContract;
 import com.example.android.sunshine.app.muzei.WeatherMuzeiSource;
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.PendingResult;
+import com.google.android.gms.common.api.ResultCallback;
+import com.google.android.gms.wearable.Asset;
+import com.google.android.gms.wearable.DataApi;
+import com.google.android.gms.wearable.PutDataMapRequest;
+import com.google.android.gms.wearable.PutDataRequest;
+import com.google.android.gms.wearable.Wearable;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -49,10 +60,13 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
+import java.util.Locale;
 import java.util.Vector;
 import java.util.concurrent.ExecutionException;
 
-public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
+public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter implements GoogleApiClient.ConnectionCallbacks,GoogleApiClient.OnConnectionFailedListener {
     public final String LOG_TAG = SunshineSyncAdapter.class.getSimpleName();
     public static final String ACTION_DATA_UPDATED =
             "com.example.android.sunshine.app.ACTION_DATA_UPDATED";
@@ -77,6 +91,22 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
     private static final int INDEX_MIN_TEMP = 2;
     private static final int INDEX_SHORT_DESC = 3;
 
+    @Override
+    public void onConnected(@Nullable Bundle bundle) {
+       sendDataToWearables();
+    }
+
+    @Override
+    public void onConnectionSuspended(int i) {
+
+    }
+
+    @Override
+    public void onConnectionFailed(@NonNull ConnectionResult connectionResult) {
+
+    }
+
+
     @Retention(RetentionPolicy.SOURCE)
     @IntDef({LOCATION_STATUS_OK, LOCATION_STATUS_SERVER_DOWN, LOCATION_STATUS_SERVER_INVALID,  LOCATION_STATUS_UNKNOWN, LOCATION_STATUS_INVALID})
     public @interface LocationStatus {}
@@ -86,6 +116,16 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
     public static final int LOCATION_STATUS_SERVER_INVALID = 2;
     public static final int LOCATION_STATUS_UNKNOWN = 3;
     public static final int LOCATION_STATUS_INVALID = 4;
+
+    GoogleApiClient googleApiClient;
+    public final String Wearable_Max="MAX";
+    public final String Wearable_Min="MIN";
+    public final String Wearable_Date="DATE";
+    public final String Wearable_Icon="ICON";
+
+    final String Wearable_Tag = "Notify Wearables:";
+    ContentValues wearableData;
+    public final String Wearable_DataPath="/sunshine/wearabledata";
 
     public SunshineSyncAdapter(Context context, boolean autoInitialize) {
         super(context, autoInitialize);
@@ -228,6 +268,8 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
 
         final String OWM_MESSAGE_CODE = "cod";
 
+        wearableData=new ContentValues();
+
         try {
             JSONObject forecastJson = new JSONObject(forecastJsonStr);
 
@@ -329,6 +371,10 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                 weatherValues.put(WeatherContract.WeatherEntry.COLUMN_SHORT_DESC, description);
                 weatherValues.put(WeatherContract.WeatherEntry.COLUMN_WEATHER_ID, weatherId);
 
+                wearableData.put(WeatherContract.WeatherEntry.COLUMN_DATE,dateTime);
+                wearableData.put(WeatherContract.WeatherEntry.COLUMN_MAX_TEMP,high);
+                wearableData.put(WeatherContract.WeatherEntry.COLUMN_MIN_TEMP,low);
+                wearableData.put(WeatherContract.WeatherEntry.COLUMN_WEATHER_ID,weatherId);
                 cVVector.add(weatherValues);
             }
 
@@ -347,6 +393,7 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                 updateWidgets();
                 updateMuzei();
                 notifyWeather();
+                notifyWearables();
             }
             Log.d(LOG_TAG, "Sync Complete. " + cVVector.size() + " Inserted");
             setLocationStatus(getContext(), LOCATION_STATUS_OK);
@@ -357,6 +404,76 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
             setLocationStatus(getContext(), LOCATION_STATUS_SERVER_INVALID);
         }
     }
+
+    private void notifyWearables()
+    {
+        if(googleApiClient!=null && googleApiClient.isConnected())
+        {
+            sendDataToWearables();
+        } else {
+            googleApiClient = new GoogleApiClient.Builder(getContext()).addApi(Wearable.API).addConnectionCallbacks(this).build();
+            googleApiClient.connect();
+        }
+    }
+
+    private void sendDataToWearables()
+    {
+        Uri weatherUri;
+        final String[] NOTIFY_WEARABLE_PROJECTION = new String[]{
+                WeatherContract.WeatherEntry.COLUMN_WEATHER_ID,
+                WeatherContract.WeatherEntry.COLUMN_DATE,
+                WeatherContract.WeatherEntry.COLUMN_MAX_TEMP,
+                WeatherContract.WeatherEntry.COLUMN_MIN_TEMP
+
+        };
+        int weatherID;
+        Double maxDegree,minDegree;
+        Long date;
+
+        String locationQuery = Utility.getPreferredLocation(getContext());
+        weatherUri=WeatherContract.WeatherEntry.buildWeatherLocationWithDate(locationQuery,System.currentTimeMillis());
+        Cursor cursor = getContext().getContentResolver().query(weatherUri, NOTIFY_WEARABLE_PROJECTION, null, null, null);
+
+        if (cursor != null && cursor.moveToFirst()) {
+            weatherID = cursor.getInt(cursor.getColumnIndex(WeatherContract.WeatherEntry.COLUMN_WEATHER_ID));
+            date = cursor.getLong(cursor.getColumnIndex(WeatherContract.WeatherEntry.COLUMN_DATE));
+            maxDegree = cursor.getDouble(cursor.getColumnIndex(WeatherContract.WeatherEntry.COLUMN_MAX_TEMP));
+            minDegree = cursor.getDouble(cursor.getColumnIndex(WeatherContract.WeatherEntry.COLUMN_MIN_TEMP));
+            //Get the weather icon to pass to the wearable
+            Resources resources = getContext().getResources();
+            Bitmap icon = BitmapFactory.decodeResource(resources,
+                    Utility.getArtResourceForWeatherCondition(weatherID));
+
+
+            Asset iconAsset = Utility.createAssetFromBitmap(icon);
+
+            SimpleDateFormat format = new SimpleDateFormat("EEEE", Locale.getDefault());
+            Calendar calendar = Calendar.getInstance();
+            String[] formattedDate = {format.format(calendar.get(Calendar.DAY_OF_WEEK)), Utility.getFormattedMonthDay(getContext(), date)};
+
+
+            PutDataMapRequest putDataMapRequest = PutDataMapRequest.create(Wearable_DataPath);
+
+            putDataMapRequest.getDataMap().putStringArray(Wearable_Date, formattedDate);
+            putDataMapRequest.getDataMap().putAsset(Wearable_Icon, iconAsset);
+            putDataMapRequest.getDataMap().putInt(Wearable_Min, (int) Math.round(minDegree));
+            putDataMapRequest.getDataMap().putInt(Wearable_Max, (int) Math.round(maxDegree));
+            PutDataRequest putDataRequest = putDataMapRequest.asPutDataRequest();
+
+            PendingResult<DataApi.DataItemResult> pendingResult =
+                    Wearable.DataApi.putDataItem(googleApiClient, putDataRequest);
+
+            pendingResult.setResultCallback(new ResultCallback<DataApi.DataItemResult>() {
+                @Override
+                public void onResult(DataApi.DataItemResult dataItemResult) {
+                    if (dataItemResult.getStatus().isSuccess()) {
+                        Log.v(LOG_TAG, "Data Item Sent: " + dataItemResult.getDataItem().getUri());
+                    }
+                }
+            });
+
+        }
+        }
 
     private void updateWidgets() {
         Context context = getContext();

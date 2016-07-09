@@ -21,18 +21,43 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.Resources;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Point;
 import android.graphics.Rect;
+import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
+import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
 import android.support.wearable.watchface.CanvasWatchFaceService;
 import android.support.wearable.watchface.WatchFaceStyle;
 import android.text.format.Time;
+import android.view.Display;
+import android.view.LayoutInflater;
 import android.view.SurfaceHolder;
+import android.view.View;
+import android.view.WindowManager;
+import android.widget.ImageView;
+import android.widget.TextView;
 
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.ResultCallback;
+import com.google.android.gms.wearable.Asset;
+import com.google.android.gms.wearable.DataApi;
+import com.google.android.gms.wearable.DataEvent;
+import com.google.android.gms.wearable.DataEventBuffer;
+import com.google.android.gms.wearable.DataItem;
+import com.google.android.gms.wearable.DataMap;
+import com.google.android.gms.wearable.DataMapItem;
+import com.google.android.gms.wearable.Wearable;
+
+import java.io.InputStream;
 import java.lang.ref.WeakReference;
 import java.util.TimeZone;
 import java.util.concurrent.TimeUnit;
@@ -41,11 +66,13 @@ import java.util.concurrent.TimeUnit;
  * Analog watch face with a ticking second hand. In ambient mode, the second hand isn't shown. On
  * devices with low-bit ambient mode, the hands are drawn without anti-aliasing in ambient mode.
  */
-public class MyWatchFace extends CanvasWatchFaceService {
+public class MyWatchFace extends CanvasWatchFaceService implements DataApi.DataListener,
+        GoogleApiClient.ConnectionCallbacks,GoogleApiClient.OnConnectionFailedListener{
     /**
      * Update rate in milliseconds for interactive mode. We update once a second to advance the
      * second hand.
      */
+    private static final Typeface typeface=Typeface.create(Typeface.SANS_SERIF,Typeface.NORMAL);
     private static final long INTERACTIVE_UPDATE_RATE_MS = TimeUnit.SECONDS.toMillis(1);
 
     /**
@@ -53,9 +80,72 @@ public class MyWatchFace extends CanvasWatchFaceService {
      */
     private static final int MSG_UPDATE_TIME = 0;
 
+    GoogleApiClient googleApiClient;
+    public final String Wearable_Max="MAX";
+    public final String Wearable_Min="MIN";
+    public final String Wearable_Date="DATE";
+    public final String Wearable_Icon="ICON";
+
+    DataMap dataMap;
+    private final Point displaySize=new Point();
+    Integer maxTemp,minTemp,specW,specH;
+
+    Asset iconAsset;
+    View rootLayout;
+
+
     @Override
     public Engine onCreateEngine() {
+        googleApiClient=new GoogleApiClient.Builder(getApplicationContext())
+                .addApi(Wearable.API)
+                .addOnConnectionFailedListener(this)
+                .addConnectionCallbacks(this).build();
+        googleApiClient.connect();
         return new Engine();
+    }
+
+    @Override
+    public void onConnected(@Nullable Bundle bundle) {
+        Wearable.DataApi.addListener(googleApiClient,this);
+    }
+
+    @Override
+    public void onConnectionSuspended(int i) {
+
+    }
+
+    String[] date;
+    Bitmap weatherIcon;
+    @Override
+    public void onDataChanged(DataEventBuffer dataEventBuffer) {
+         for(DataEvent dataEvent : dataEventBuffer)
+         {
+             if(dataEvent.getType() == DataEvent.TYPE_CHANGED){
+                 DataItem dataItem = dataEvent.getDataItem();
+                 dataMap = DataMapItem.fromDataItem(dataItem).getDataMap();
+                 maxTemp=dataMap.getInt(Wearable_Max);
+                 minTemp=dataMap.getInt(Wearable_Min);
+                 iconAsset=dataMap.getAsset(Wearable_Icon);
+                 date=dataMap.getStringArray(Wearable_Date);
+                 loadBitmap(iconAsset);
+             }
+         }
+    }
+
+    public void loadBitmap(Asset asset)
+    {
+        Wearable.DataApi.getFdForAsset(googleApiClient,asset).setResultCallback(new ResultCallback<DataApi.GetFdForAssetResult>() {
+            @Override
+            public void onResult(@NonNull DataApi.GetFdForAssetResult getFdForAssetResult) {
+                InputStream inputStream = getFdForAssetResult.getInputStream();
+                weatherIcon = BitmapFactory.decodeStream(inputStream);
+            }
+        });
+    }
+
+    @Override
+    public void onConnectionFailed(@NonNull ConnectionResult connectionResult) {
+
     }
 
     private static class EngineHandler extends Handler {
@@ -99,6 +189,8 @@ public class MyWatchFace extends CanvasWatchFaceService {
          * disable anti-aliasing in ambient mode.
          */
         boolean mLowBitAmbient;
+        TextView timeView,dateView,minTempView,maxTempView;
+        ImageView iconView;
 
         @Override
         public void onCreate(SurfaceHolder holder) {
@@ -123,6 +215,19 @@ public class MyWatchFace extends CanvasWatchFaceService {
             mHandPaint.setStrokeCap(Paint.Cap.ROUND);
 
             mTime = new Time();
+
+            LayoutInflater layoutInflater = (LayoutInflater)getSystemService(Context.LAYOUT_INFLATER_SERVICE);
+            rootLayout=layoutInflater.inflate(R.layout.watch_face_layout,null);
+            Display display= ((WindowManager)getSystemService(Context.WINDOW_SERVICE)).getDefaultDisplay();
+            display.getSize(displaySize);
+
+            specW=View.MeasureSpec.makeMeasureSpec(displaySize.x,View.MeasureSpec.EXACTLY);
+            specH=View.MeasureSpec.makeMeasureSpec(displaySize.y,View.MeasureSpec.EXACTLY);
+            maxTempView=(TextView)rootLayout.findViewById(R.id.maxTempText);
+            minTempView=(TextView)rootLayout.findViewById(R.id.minTempText);
+            dateView=(TextView)rootLayout.findViewById(R.id.dateText);
+            timeView=(TextView)rootLayout.findViewById(R.id.timeText);
+            iconView=(ImageView)rootLayout.findViewById(R.id.weatherImage);
         }
 
         @Override
@@ -197,31 +302,26 @@ public class MyWatchFace extends CanvasWatchFaceService {
             // Find the center. Ignore the window insets so that, on round watches with a
             // "chin", the watch face is centered on the entire screen, not just the usable
             // portion.
-            float centerX = bounds.width() / 2f;
-            float centerY = bounds.height() / 2f;
+            mTime.setToNow();
+            String text = mAmbient
+                    ? String.format("%d:%02d", mTime.hour, mTime.minute)
+                    : String.format("%d:%02d:%02d", mTime.hour, mTime.minute, mTime.second);
 
-            float secRot = mTime.second / 30f * (float) Math.PI;
-            int minutes = mTime.minute;
-            float minRot = minutes / 30f * (float) Math.PI;
-            float hrRot = ((mTime.hour + (minutes / 60f)) / 6f) * (float) Math.PI;
-
-            float secLength = centerX - 20;
-            float minLength = centerX - 40;
-            float hrLength = centerX - 80;
-
-            if (!mAmbient) {
-                float secX = (float) Math.sin(secRot) * secLength;
-                float secY = (float) -Math.cos(secRot) * secLength;
-                canvas.drawLine(centerX, centerY, centerX + secX, centerY + secY, mHandPaint);
+            timeView.setText(text);
+            if(maxTemp !=null && minTemp!=null)
+            {
+                rootLayout.measure(specW,specH);
+                rootLayout.layout(0,0,rootLayout.getMeasuredWidth(),rootLayout.getMeasuredHeight());
+                maxTempView.setText(Integer.toString(maxTemp));
+                minTempView.setText(Integer.toString(minTemp));
+                dateView.setText(date[0] + "" +date[1]);
+                iconView.setImageBitmap(weatherIcon);
             }
-
-            float minX = (float) Math.sin(minRot) * minLength;
-            float minY = (float) -Math.cos(minRot) * minLength;
-            canvas.drawLine(centerX, centerY, centerX + minX, centerY + minY, mHandPaint);
-
-            float hrX = (float) Math.sin(hrRot) * hrLength;
-            float hrY = (float) -Math.cos(hrRot) * hrLength;
-            canvas.drawLine(centerX, centerY, centerX + hrX, centerY + hrY, mHandPaint);
+            else
+            {
+                System.out.print("Trying" +minTemp+ "" +maxTemp);
+            }
+            rootLayout.draw(canvas);
         }
 
         @Override
